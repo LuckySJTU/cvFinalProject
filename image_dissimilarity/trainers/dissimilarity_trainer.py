@@ -1,6 +1,7 @@
 import torch
 import os
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -8,6 +9,25 @@ import sys
 sys.path.append("..")
 from image_dissimilarity.util import trainer_util
 from image_dissimilarity.models.dissimilarity_model import DissimNet, DissimNetPrior
+
+class LabelSmoothingCrossEntropy(torch.nn.Module):
+    def __init__(self, epsilon: float = 0.1, reduction='sum'):
+        super().__init__()
+        self.epsilon = epsilon
+        self.reduction = reduction
+
+    def reduce_loss(self, loss, reduction='sum'):
+        return loss.mean() if reduction == 'sum' else loss.sum() if reduction == 'sum' else loss
+
+    def linear_combination(self, x, y, epsilon):
+        return epsilon * x + (1 - epsilon) * y
+
+    def forward(self, preds, target):
+        n = preds.size()[-1]
+        log_preds = F.log_softmax(preds, dim=-1)
+        loss = self.reduce_loss(-log_preds.sum(dim=-1), self.reduction)
+        nll = F.nll_loss(log_preds, target, reduction=self.reduction)
+        return self.linear_combination(loss / n, nll, self.epsilon)
 
 class DissimilarityTrainer():
     """
@@ -87,9 +107,11 @@ class DissimilarityTrainer():
                 else:
                     class_weights = [1.46494611, 16.5204619]
             print('Using the following weights for each respective class [0,1]:', class_weights)
-            self.criterion = nn.CrossEntropyLoss(ignore_index=255, weight=torch.FloatTensor(class_weights).to("cuda")).cuda(self.gpu)
+            #self.criterion = nn.CrossEntropyLoss(ignore_index=255, weight=torch.FloatTensor(class_weights).to("cuda")).cuda(self.gpu)
+            self.criterion=LabelSmoothingCrossEntropy()
         else:
-            self.criterion = nn.CrossEntropyLoss(ignore_index=255).cuda(self.gpu)
+            #self.criterion = nn.CrossEntropyLoss(ignore_index=255).cuda(self.gpu)
+            self.criterion=LabelSmoothingCrossEntropy()
         
     def run_model_one_step(self, original, synthesis, semantic, label):
         self.optimizer.zero_grad()
