@@ -230,6 +230,7 @@ class DissimNetPrior(nn.Module):
             self.conv11 = nn.Conv2d(64, 2, kernel_size=1, padding=0)
 
         # self._initialize_weights()
+        self.myNet=nn.Conv2d(65,2,kernel_size=3,padding=1)
 
     def _initialize_weights(self):
         for m in self.modules():
@@ -325,6 +326,11 @@ class DissimNetPrior(nn.Module):
             x = self.conv6(x)
         logits = self.conv11(x)
         return logits
+
+        # return self.myNet(layer1_cat)
+
+        
+
 
 
 class ResNetDissimNet(nn.Module):

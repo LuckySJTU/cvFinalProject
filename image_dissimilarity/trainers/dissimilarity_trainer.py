@@ -1,6 +1,7 @@
 import torch
 import os
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -8,6 +9,52 @@ import sys
 sys.path.append("..")
 from image_dissimilarity.util import trainer_util
 from image_dissimilarity.models.dissimilarity_model import DissimNet, DissimNetPrior
+
+class LabelSmoothingCrossEntropy(torch.nn.Module):
+    def __init__(self, epsilon: float = 0.1, reduction='sum',ignore_index=-100,weight=None):
+        super().__init__()
+        self.epsilon = epsilon
+        self.reduction = reduction
+        self.ignore_index=ignore_index
+        self.weight=weight
+
+    def reduce_loss(self, loss, reduction='sum'):
+        return loss.mean() if reduction == 'sum' else loss.sum() if reduction == 'sum' else loss
+
+    def linear_combination(self, x, y, epsilon):
+        return epsilon * x + (1 - epsilon) * y
+
+    def forward(self, preds, target):
+        n = preds.size()[-1]
+        log_preds = F.log_softmax(preds, dim=-1)
+        loss = self.reduce_loss(-log_preds.sum(dim=-1), self.reduction)
+        nll = F.nll_loss(log_preds, target, reduction=self.reduction,weight=self.weight,ignore_index=self.ignore_index)
+        return self.linear_combination(loss / n, nll, self.epsilon)
+
+# class LabelSmoothingCrossEntropy(nn.Module):
+#     """
+#     NLL loss with label smoothing.
+#     """
+#     def __init__(self, smoothing=0.1,ignore_index=-100,weight=None):
+#         """
+#         Constructor for the LabelSmoothing module.
+#         :param smoothing: label smoothing factor
+#         """
+#         super(LabelSmoothingCrossEntropy, self).__init__()
+#         assert smoothing < 1.0
+#         self.smoothing = smoothing
+#         self.confidence = 1. - smoothing
+#         self.ignore_index=ignore_index
+#         self.weight=weight
+
+#     def forward(self, x, target):
+#         logprobs = F.log_softmax(x, dim=-1)
+#         nll_loss = -logprobs.gather(dim=-1, index=target.unsqueeze(1))
+#         nll_loss = nll_loss.squeeze(1)
+#         smooth_loss = -logprobs.mean(dim=-1)
+#         loss = self.confidence * nll_loss + self.smoothing * smooth_loss
+#         return loss.mean()
+
 
 class DissimilarityTrainer():
     """
@@ -23,10 +70,10 @@ class DissimilarityTrainer():
         cudnn.enabled = True
         self.config = config
         
-        if config['gpu_ids'] != -1:
+        if config['gpu_ids'] != "-1":
             self.gpu = 'cuda'
         else:
-            self.gpu = 'cpu'
+            self.gpu = None
         
         if config['model']['prior']:
             self.diss_model = DissimNetPrior(**config['model']).cuda(self.gpu)
@@ -88,13 +135,16 @@ class DissimilarityTrainer():
                     class_weights = [1.46494611, 16.5204619]
             print('Using the following weights for each respective class [0,1]:', class_weights)
             self.criterion = nn.CrossEntropyLoss(ignore_index=255, weight=torch.FloatTensor(class_weights).to("cuda")).cuda(self.gpu)
+            # self.criterion=LabelSmoothingCrossEntropy(ignore_index=255, weight=torch.FloatTensor(class_weights).to("cuda")).cuda(self.gpu)
         else:
             self.criterion = nn.CrossEntropyLoss(ignore_index=255).cuda(self.gpu)
+            # self.criterion=LabelSmoothingCrossEntropy(ignore_index=255).cuda(self.gpu)
         
     def run_model_one_step(self, original, synthesis, semantic, label):
         self.optimizer.zero_grad()
         predictions = self.diss_model(original, synthesis, semantic)
         model_loss = self.criterion(predictions, label.type(torch.LongTensor).squeeze(dim=1).cuda())
+        # print(model_loss)
         model_loss.backward()
         self.optimizer.step()
         self.model_losses = model_loss
@@ -117,8 +167,9 @@ class DissimilarityTrainer():
         return model_loss, predictions
 
     def run_validation_prior(self, original, synthesis, semantic, label, entropy, mae, distance):
-        predictions = self.diss_model(original, synthesis, semantic, entropy, mae, distance)
-        model_loss = self.criterion(predictions, label.type(torch.LongTensor).squeeze(dim=1).cuda())
+        self.diss_model.cuda(self.gpu)
+        predictions = self.diss_model(original.cuda(), synthesis.cuda(), semantic.cuda(), entropy.cuda(), mae.cuda(), distance.cuda())
+        model_loss = self.criterion(predictions, label.type(torch.LongTensor).squeeze(dim=1).cuda(self.gpu))
         return model_loss, predictions
 
     def get_latest_losses(self):
